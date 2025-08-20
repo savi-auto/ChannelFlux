@@ -304,3 +304,97 @@
       )
       ERR-INVALID-SIGNATURE
     )
+
+    ;; Ensure balance conservation
+    (asserts! (is-eq total-channel-funds (+ balance-a balance-b))
+      ERR-BALANCE-MISMATCH
+    )
+
+    ;; Distribute balances safely
+    (if (> balance-a u0)
+      (try! (as-contract (stx-transfer? balance-a tx-sender tx-sender)))
+      true
+    )
+    (if (> balance-b u0)
+      (try! (as-contract (stx-transfer? balance-b tx-sender participant-b)))
+      true
+    )
+
+    ;; Mark channel as closed and clear balances
+    (map-set payment-channels {
+      channel-id: channel-id,
+      participant-a: tx-sender,
+      participant-b: participant-b,
+    }
+      (merge channel {
+        is-open: false,
+        balance-a: u0,
+        balance-b: u0,
+        total-deposited: u0,
+        nonce: (+ channel-nonce u1),
+      })
+    )
+    (ok true)
+  )
+)
+
+;; Enhanced Dispute Resolution
+(define-public (initiate-unilateral-close
+    (channel-id (buff 32))
+    (participant-b principal)
+    (proposed-balance-a uint)
+    (proposed-balance-b uint)
+    (signature (buff 65))
+  )
+  (let (
+      (channel (unwrap!
+        (map-get? payment-channels {
+          channel-id: channel-id,
+          participant-a: tx-sender,
+          participant-b: participant-b,
+        })
+        ERR-CHANNEL-NOT-FOUND
+      ))
+      (total-channel-funds (get total-deposited channel))
+      (channel-nonce (get nonce channel))
+      (message (construct-balance-message channel-id proposed-balance-a proposed-balance-b channel-nonce))
+      (dispute-blocks u144) ;; ~24 hours at 10 min blocks
+    )
+    
+    ;; Enhanced validation
+    (asserts! (validate-channel-params channel-id participant-b proposed-balance-a proposed-balance-b)
+      ERR-INVALID-INPUT)
+    (asserts! (get is-open channel) ERR-CHANNEL-CLOSED)
+    (asserts! (is-eq (get dispute-deadline channel) u0) ERR-DISPUTE-PERIOD) ;; No active dispute
+    
+    ;; Check authorization
+    (asserts! (is-channel-participant channel-id tx-sender participant-b tx-sender) 
+      ERR-UNAUTHORIZED-PARTICIPANT)
+    
+    (asserts! (verify-signature message signature tx-sender)
+      ERR-INVALID-SIGNATURE
+    )
+    (asserts!
+      (is-eq total-channel-funds (+ proposed-balance-a proposed-balance-b))
+      ERR-BALANCE-MISMATCH
+    )
+
+    ;; Set dispute deadline with bounds checking
+    (asserts! (<= (+ stacks-block-height dispute-blocks) (+ stacks-block-height MAX-DISPUTE-BLOCKS))
+      ERR-INVALID-INPUT)
+
+    ;; Lock balances until dispute deadline
+    (map-set payment-channels {
+      channel-id: channel-id,
+      participant-a: tx-sender,
+      participant-b: participant-b,
+    }
+      (merge channel {
+        dispute-deadline: (+ stacks-block-height dispute-blocks),
+        balance-a: proposed-balance-a,
+        balance-b: proposed-balance-b,
+      })
+    )
+    (ok true)
+  )
+)
