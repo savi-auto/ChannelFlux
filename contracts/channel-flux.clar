@@ -398,3 +398,104 @@
     (ok true)
   )
 )
+
+(define-public (resolve-unilateral-close
+    (channel-id (buff 32))
+    (participant-b principal)
+  )
+  (let (
+      (channel (unwrap!
+        (map-get? payment-channels {
+          channel-id: channel-id,
+          participant-a: tx-sender,
+          participant-b: participant-b,
+        })
+        ERR-CHANNEL-NOT-FOUND
+      ))
+      (proposed-balance-a (get balance-a channel))
+      (proposed-balance-b (get balance-b channel))
+    )
+    
+    ;; Enhanced validation
+    (asserts! (is-valid-channel-id channel-id) ERR-INVALID-INPUT)
+    (asserts! (is-valid-participant participant-b) ERR-INVALID-INPUT)
+    (asserts! (>= stacks-block-height (get dispute-deadline channel))
+      ERR-DISPUTE-PERIOD)
+    
+    ;; Check authorization
+    (asserts! (is-channel-participant channel-id tx-sender participant-b tx-sender) 
+      ERR-UNAUTHORIZED-PARTICIPANT)
+
+    ;; Transfer balances post-dispute with safety checks
+    (if (> proposed-balance-a u0)
+      (try! (as-contract (stx-transfer? proposed-balance-a tx-sender tx-sender)))
+      true
+    )
+    (if (> proposed-balance-b u0)
+      (try! (as-contract (stx-transfer? proposed-balance-b tx-sender participant-b)))
+      true
+    )
+
+    (map-set payment-channels {
+      channel-id: channel-id,
+      participant-a: tx-sender,
+      participant-b: participant-b,
+    }
+      (merge channel {
+        is-open: false,
+        balance-a: u0,
+        balance-b: u0,
+        total-deposited: u0,
+      })
+    )
+    (ok true)
+  )
+)
+
+;; API & Safeguards
+
+(define-read-only (get-channel-info
+    (channel-id (buff 32))
+    (participant-a principal)
+    (participant-b principal)
+  )
+  ;; Validate inputs before querying
+  (if (and 
+        (is-valid-channel-id channel-id)
+        (is-valid-participant participant-a)
+        (is-valid-participant participant-b))
+    (map-get? payment-channels {
+      channel-id: channel-id,
+      participant-a: participant-a,
+      participant-b: participant-b,
+    })
+    none
+  )
+)
+
+(define-read-only (is-authorized-participant
+    (channel-id (buff 32))
+    (participant principal)
+  )
+  (default-to false 
+    (get authorized 
+      (map-get? channel-participants {
+        channel-id: channel-id,
+        participant: participant,
+      })
+    )
+  )
+)
+
+(define-public (emergency-withdraw)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (let ((contract-balance (stx-get-balance (as-contract tx-sender))))
+      (if (> contract-balance u0)
+        (try! (stx-transfer? contract-balance (as-contract tx-sender) CONTRACT-OWNER))
+        true
+      )
+    )
+    (ok true)
+  )
+)
